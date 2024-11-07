@@ -35,7 +35,7 @@ from skimage import io
 from skimage.transform import AffineTransform
 from skimage.draw import polygon
 import tifffile
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, shared_memory
 
 
 ########## File input from zarr
@@ -48,6 +48,22 @@ def open_zarr(path: str) -> zarr.Group:
         else zarr.DirectoryStore(path)
     )
     return zarr.group(store=store)
+
+
+########## Load image to shared memory 
+
+def load_image_shared(image_path, channel=1):
+    # Load the image and select the specified channel
+    image = tifffile.imread(image_path)[channel]
+    
+    # Create shared memory for the image
+    shm = shared_memory.SharedMemory(create=True, size=image.nbytes)
+    
+    # Copy the image data into the shared memory
+    shared_image = np.ndarray(image.shape, dtype=image.dtype, buffer=shm.buf)
+    np.copyto(shared_image, image)
+    
+    return shm, image.shape, image.dtype
 
 ########## Converting cell id prefix to string
 """The cell id from 10X Xenium outputs needs to be converted from numeric to string using the following"""
@@ -129,37 +145,44 @@ def apply_affine_transformation(vertices, num_vertices, alignment_matrix, invers
 
 ########## Calculates MFI
 
-def calculate_MFI_stats(image, polygon_coords, channel=1):
+def calculate_MFI_stats(image, polygon_coords):
     """Calculates the statistics around pixel intensity values within polygon boundaries"""
-    image_chl2 = image[channel] #For my images channel index 1 is Cy5, index 0 is usually DAPI
+    #image_chl2 = image[channel] #For my images channel index 1 is Cy5, index 0 is usually DAPI
 
     x_coords, y_coords = polygon_coords[:, 0], polygon_coords[:, 1]
 
-    rr, cc = polygon(np.clip(y_coords, 0, image_chl2.shape[0] - 1), 
-                     np.clip(x_coords, 0, image_chl2.shape[1] - 1))
+    rr, cc = polygon(np.clip(y_coords, 0, image.shape[0] - 1), 
+                     np.clip(x_coords, 0, image.shape[1] - 1))
     
-    MFI = np.mean(image_chl2[rr, cc])
-    min_int = np.min(image_chl2[rr, cc])
-    max_int = np.max(image_chl2[rr, cc])
+    MFI = np.mean(image[rr, cc])
+    min_int = np.min(image[rr, cc])
+    max_int = np.max(image[rr, cc])
 
     return MFI, min_int, max_int
 
 ########## Parallel Processing
 
-def process_polygon_chunk(image, polygons_chunk):
+def process_polygon_chunk(shm_name, image_shape, image_dtype, polygons_chunk):
+    # Access the shared memory
+    shm = shared_memory.SharedMemory(name=shm_name)
+    
+    # Create a numpy array backed by shared memory
+    shared_image = np.ndarray(image_shape, dtype=image_dtype, buffer=shm.buf)
+    
     intensity_stats = []
     for polygon in polygons_chunk:
-        intensity_stat = calculate_MFI_stats(image, polygon, channel=1)
+        intensity_stat = calculate_MFI_stats(shared_image, polygon)
         intensity_stats.append(intensity_stat)
     return intensity_stats
 
-def parallel_process_polygons(image, polygons, num_workers=None):
+def parallel_process_polygons(shm_name, image_shape, image_dtype, polygons, num_workers=None):
     if num_workers is None:
         num_workers = max(1, cpu_count() - 1)
     chunk_size = len(polygons) // num_workers
+    #chunk_size=50000
     polygon_chunks = [polygons[i:i + chunk_size] for i in range(0, len(polygons), chunk_size)]
     with Pool(processes=num_workers) as pool:
-        results = pool.starmap(process_polygon_chunk, [(image, chunk) for chunk in polygon_chunks])
+        results = pool.starmap(process_polygon_chunk, [(shm_name, image_shape, image_dtype, chunk) for chunk in polygon_chunks])
     return [item for sublist in results for item in sublist]
 
 
@@ -170,7 +193,7 @@ def main(image_path, zarr_path, alignment_matrix_path, output_file_path, segment
         output_file_path = os.path.join(os.getcwd(), "pyMFI_output_results.csv")
     
     # Load image
-    image = tifffile.imread(image_path)
+    shm, image_shape, image_dtype = load_image_shared(image_path)
     
     # Load Zarr data
     zarr_file = open_zarr(zarr_path)
@@ -183,7 +206,7 @@ def main(image_path, zarr_path, alignment_matrix_path, output_file_path, segment
     transformed_polygons = apply_affine_transformation(vertices, num_vertices, alignment_matrix)
     
     # Calculate mean intensities in parallel
-    intensity_stats = parallel_process_polygons(image, transformed_polygons, num_workers)
+    intensity_stats = parallel_process_polygons(shm.name, image_shape, image_dtype, transformed_polygons, num_workers)
     
     # Write results to the output .csv file
     with open(output_file_path, 'w', newline='') as file:
@@ -193,6 +216,8 @@ def main(image_path, zarr_path, alignment_matrix_path, output_file_path, segment
             writer.writerow([cell_id, mean_intensity, min_intensity, max_intensity])  # Write each row with cell ID and mean intensity
     
     print(f"Results saved to {output_file_path}")
+    shm.close()
+    shm.unlink()
 
 if __name__ == "__main__":
     # Set up argument parsing
@@ -221,10 +246,10 @@ if __name__ == "__main__":
         num_workers=args.num_workers
     )
 
-    # Example usage
-    #image_path = "/santangelo-lab/JimR/Xenium/XEN1_CRE_P81_Mouse_Lung/IF/Cre_P81_1_Lung_Xenslide1.ome.tif"
-    #zarr_path = "/data-raid/Xenium/20241010__184320__XEN1___Cre_P81_Mouse_Lung_101024/output-XETG00215__0033993__P81-1-Lung__20241010__184343/cells.zarr.zip"
-    #alignment_matrix_path = "/santangelo-lab/JimR/Xenium/XEN1_CRE_P81_Mouse_Lung/IF/Cre_P81_1_Lung_Xenslide1_matrix.csv"
+    # Example usage (for testing)
+    #image_path = "/santangelo-lab/JimR/Xenium/XEN1_CRE_P81_Mouse_Lung/IF/Cre_P81_2_Lung_Xenslide2.ome.tif"
+    #zarr_path = "/data-raid/Xenium/20241010__184320__XEN1___Cre_P81_Mouse_Lung_101024/output-XETG00215__0033995__P81-2-Lung__20241010__184343-2/cells.zarr.zip"
+    #alignment_matrix_path = "/santangelo-lab/JimR/Xenium/XEN1_CRE_P81_Mouse_Lung/IF/Cre_P81_2_Lung_Xenslide2_matrix.csv"
     
     #main(image_path, zarr_path, alignment_matrix_path, output_file_path=None, segment_type='1', pix_size=0.2125, num_workers=8)
 
