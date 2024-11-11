@@ -154,6 +154,11 @@ def calculate_MFI_stats(image, polygon_coords):
     rr, cc = polygon(np.clip(y_coords, 0, image.shape[0] - 1), 
                      np.clip(x_coords, 0, image.shape[1] - 1))
     
+    # Check if the polygon area contains valid indices
+    if len(rr) == 0 or len(cc) == 0 or image[rr, cc].size == 0:
+        # Return NaN values if no valid pixels are found within the polygon
+        return float('nan'), float('nan'), float('nan')
+    
     MFI = np.mean(image[rr, cc])
     min_int = np.min(image[rr, cc])
     max_int = np.max(image[rr, cc])
