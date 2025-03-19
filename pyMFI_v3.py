@@ -22,7 +22,7 @@ Author:
 jrose
 
 Date modified:
-07Nov2024
+19Mar2024
 
 """
 
@@ -193,12 +193,12 @@ def parallel_process_polygons(shm_name, image_shape, image_dtype, polygons, num_
 
 ########## Main function
 
-def main(image_path, zarr_path, alignment_matrix_path, output_file_path, segment_type='cells', pix_size=0.2125, num_workers=None):
+def main(image_path, zarr_path, alignment_matrix_path, output_file_path, segment_type='cells', pix_size=0.2125, num_workers=None, channel=1):
     if output_file_path is None:
         output_file_path = os.path.join(os.getcwd(), "pyMFI_output_results.csv")
     
     # Load image
-    shm, image_shape, image_dtype = load_image_shared(image_path)
+    shm, image_shape, image_dtype = load_image_shared(image_path, channel=channel)
     
     # Load Zarr data
     zarr_file = open_zarr(zarr_path)
@@ -236,6 +236,8 @@ if __name__ == "__main__":
     parser.add_argument("--segment_type", type=str, default='cells', help="Cell or nuclei segments in Xenium output (default: 'cells' for cell segments. Pass 'nuclei' for nuclei segments)")
     parser.add_argument("--pix_size", type=float, default=0.2125, help="Pixel size (um/pixel) for morphology image scaling (default: 0.2125)")
     parser.add_argument("--num_workers", type=int, default=8, help="Number of parallel workers (default: 8. Pass None for max available - 1)")
+    parser.add_argument("--channel", type=int, default=1, help="Channel index to use for MFI calculation (default: 1)")
+
 
     # Parse arguments
     args = parser.parse_args()
@@ -248,7 +250,8 @@ if __name__ == "__main__":
         output_file_path=args.output_file_path,
         segment_type=args.segment_type,
         pix_size=args.pix_size,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        channel=args.channel
     )
 
     # Example usage (for testing)
